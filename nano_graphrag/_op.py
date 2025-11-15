@@ -1,3 +1,18 @@
+"""
+Core Operations Module for nano-graphrag
+
+This module provides the core operations for the GraphRAG (Graph-based Retrieval-Augmented Generation) pipeline,
+including:
+- Text chunking and tokenization
+- Entity and relationship extraction from text
+- Community detection and report generation
+- Query operations (local, global, and naive search)
+- Context building for RAG queries
+
+The module implements the main algorithmic components that power the nano-graphrag system,
+handling everything from document preprocessing to intelligent query answering.
+"""
+
 import re
 import json
 import asyncio
@@ -31,10 +46,30 @@ from .prompt import GRAPH_FIELD_SEP, PROMPTS
 def chunking_by_token_size(
     tokens_list: list[list[int]],
     doc_keys,
-    tokenizer_wrapper: TokenizerWrapper, 
+    tokenizer_wrapper: TokenizerWrapper,
     overlap_token_size=128,
     max_token_size=1024,
 ):
+    """
+    Split documents into overlapping chunks based on token size.
+
+    This function implements a simple sliding window approach to chunk tokenized documents.
+    Each chunk has a maximum size and overlaps with adjacent chunks for better context continuity.
+
+    Args:
+        tokens_list: List of token sequences, where each sequence represents a document
+        doc_keys: List of document identifiers corresponding to tokens_list
+        tokenizer_wrapper: TokenizerWrapper instance for encoding/decoding tokens
+        overlap_token_size: Number of tokens to overlap between consecutive chunks (default: 128)
+        max_token_size: Maximum number of tokens per chunk (default: 1024)
+
+    Returns:
+        list[dict]: List of chunk dictionaries, each containing:
+            - tokens: Number of tokens in the chunk
+            - content: Decoded text content of the chunk
+            - chunk_order_index: Sequential index of the chunk within its document
+            - full_doc_id: Identifier of the source document
+    """
     results = []
     for index, tokens in enumerate(tokens_list):
         chunk_token = []
@@ -65,8 +100,28 @@ def chunking_by_seperators(
     overlap_token_size=128,
     max_token_size=1024,
 ):
+    """
+    Split documents into chunks using semantic separators (like newlines, periods, etc.).
+
+    This approach is more intelligent than simple token-based chunking, as it attempts to
+    preserve semantic boundaries by splitting on natural text separators.
+
+    Args:
+        tokens_list: List of token sequences, where each sequence represents a document
+        doc_keys: List of document identifiers corresponding to tokens_list
+        tokenizer_wrapper: TokenizerWrapper instance for encoding/decoding tokens
+        overlap_token_size: Number of tokens to overlap between consecutive chunks (default: 128)
+        max_token_size: Maximum number of tokens per chunk (default: 1024)
+
+    Returns:
+        list[dict]: List of chunk dictionaries, each containing:
+            - tokens: Number of tokens in the chunk
+            - content: Decoded text content of the chunk
+            - chunk_order_index: Sequential index of the chunk within its document
+            - full_doc_id: Identifier of the source document
+    """
     from .prompt import PROMPTS
-    # *** 修改 ***: 直接使用 wrapper 编码，而不是获取底层 tokenizer
+    # NOTE: Directly use wrapper encoding instead of accessing underlying tokenizer
     separators = [tokenizer_wrapper.encode(s) for s in PROMPTS["default_text_separator"]]
     splitter = SeparatorSplitter(
         separators=separators,
@@ -92,6 +147,21 @@ def chunking_by_seperators(
 
 
 def get_chunks(new_docs, chunk_func=chunking_by_token_size, tokenizer_wrapper: TokenizerWrapper = None, **chunk_func_params):
+    """
+    Process new documents and generate text chunks using the specified chunking function.
+
+    This is a high-level function that coordinates the chunking process, handling tokenization
+    and generating unique IDs for each chunk.
+
+    Args:
+        new_docs: Dictionary mapping document IDs to document data (containing 'content' field)
+        chunk_func: Function to use for chunking (default: chunking_by_token_size)
+        tokenizer_wrapper: TokenizerWrapper instance for tokenization
+        **chunk_func_params: Additional parameters to pass to the chunking function
+
+    Returns:
+        dict: Dictionary mapping chunk IDs (MD5 hash) to chunk data dictionaries
+    """
     inserting_chunks = {}
     new_docs_list = list(new_docs.items())
     docs = [new_doc[1]["content"] for new_doc in new_docs_list]
@@ -114,6 +184,21 @@ async def _handle_entity_relation_summary(
     global_config: dict,
     tokenizer_wrapper: TokenizerWrapper,
 ) -> str:
+    """
+    Summarize entity or relationship descriptions if they exceed the maximum token limit.
+
+    This function checks if descriptions are too long and uses an LLM to generate
+    a concise summary when necessary, helping to keep the knowledge graph manageable.
+
+    Args:
+        entity_or_relation_name: Name of the entity or relationship being summarized
+        description: Full description text to potentially summarize
+        global_config: Global configuration dictionary containing LLM settings
+        tokenizer_wrapper: TokenizerWrapper instance for token counting
+
+    Returns:
+        str: Either the original description (if short enough) or an LLM-generated summary
+    """
     use_llm_func: callable = global_config["cheap_model_func"]
     llm_max_tokens = global_config["cheap_model_max_token_size"]
     summary_max_tokens = global_config["entity_summary_to_max_tokens"]
@@ -139,9 +224,24 @@ async def _handle_single_entity_extraction(
     record_attributes: list[str],
     chunk_key: str,
 ):
+    """
+    Parse and validate a single entity extraction record.
+
+    Processes raw extraction attributes and validates them to create an entity record
+    suitable for adding to the knowledge graph.
+
+    Args:
+        record_attributes: List of attribute strings from the LLM extraction
+            Expected format: ["entity", name, type, description, ...]
+        chunk_key: Identifier of the source text chunk
+
+    Returns:
+        dict or None: Entity dictionary with keys (entity_name, entity_type, description, source_id)
+            Returns None if the record is invalid
+    """
     if len(record_attributes) < 4 or record_attributes[0] != '"entity"':
         return None
-    # add this record as a node in the G
+    # Add this record as a node in the graph
     entity_name = clean_str(record_attributes[1].upper())
     if not entity_name.strip():
         return None
@@ -160,9 +260,24 @@ async def _handle_single_relationship_extraction(
     record_attributes: list[str],
     chunk_key: str,
 ):
+    """
+    Parse and validate a single relationship extraction record.
+
+    Processes raw extraction attributes to create a relationship/edge record
+    for the knowledge graph.
+
+    Args:
+        record_attributes: List of attribute strings from the LLM extraction
+            Expected format: ["relationship", source, target, description, ..., weight]
+        chunk_key: Identifier of the source text chunk
+
+    Returns:
+        dict or None: Relationship dictionary with keys (src_id, tgt_id, weight, description, source_id)
+            Returns None if the record is invalid
+    """
     if len(record_attributes) < 5 or record_attributes[0] != '"relationship"':
         return None
-    # add this record as edge
+    # Add this record as an edge
     source = clean_str(record_attributes[1].upper())
     target = clean_str(record_attributes[2].upper())
     edge_description = clean_str(record_attributes[3])
@@ -186,6 +301,22 @@ async def _merge_nodes_then_upsert(
     global_config: dict,
     tokenizer_wrapper,
 ):
+    """
+    Merge multiple node records for the same entity and upsert to the knowledge graph.
+
+    When the same entity appears in multiple chunks, this function consolidates
+    all the information (types, descriptions, source IDs) and updates the graph.
+
+    Args:
+        entity_name: Name of the entity to merge and upsert
+        nodes_data: List of node data dictionaries to merge
+        knwoledge_graph_inst: Knowledge graph storage instance
+        global_config: Global configuration dictionary
+        tokenizer_wrapper: TokenizerWrapper instance for summarization
+
+    Returns:
+        dict: Merged node data with entity_name included
+    """
     already_entitiy_types = []
     already_source_ids = []
     already_description = []
@@ -235,6 +366,23 @@ async def _merge_edges_then_upsert(
     global_config: dict,
     tokenizer_wrapper,
 ):
+    """
+    Merge multiple edge records for the same relationship and upsert to the knowledge graph.
+
+    When the same relationship appears in multiple chunks, this function consolidates
+    all the information (weights, descriptions, source IDs) and updates the graph.
+
+    Args:
+        src_id: Source entity ID
+        tgt_id: Target entity ID
+        edges_data: List of edge data dictionaries to merge
+        knwoledge_graph_inst: Knowledge graph storage instance
+        global_config: Global configuration dictionary
+        tokenizer_wrapper: TokenizerWrapper instance for summarization
+
+    Returns:
+        None
+    """
     already_weights = []
     already_source_ids = []
     already_description = []
@@ -287,6 +435,25 @@ async def extract_entities(
     global_config: dict,
     using_amazon_bedrock: bool=False,
 ) -> Union[BaseGraphStorage, None]:
+    """
+    Extract entities and relationships from text chunks using LLM-based extraction.
+
+    This is the main entity extraction function that processes text chunks, uses an LLM
+    to identify entities and relationships, and populates the knowledge graph. It implements
+    a "gleaning" approach where the LLM is prompted multiple times to extract additional
+    information.
+
+    Args:
+        chunks: Dictionary mapping chunk IDs to TextChunkSchema objects
+        knwoledge_graph_inst: Knowledge graph storage instance to populate
+        entity_vdb: Vector database for storing entity embeddings
+        tokenizer_wrapper: TokenizerWrapper instance for tokenization
+        global_config: Global configuration dictionary with LLM settings
+        using_amazon_bedrock: Whether Amazon Bedrock is being used (affects message formatting)
+
+    Returns:
+        BaseGraphStorage or None: Updated knowledge graph instance, or None if no entities extracted
+    """
     use_llm_func: callable = global_config["best_model_func"]
     entity_extract_max_gleaning = global_config["entity_extract_max_gleaning"]
 
@@ -419,7 +586,22 @@ def _pack_single_community_by_sub_communities(
     max_token_size: int,
     already_reports: dict[str, CommunitySchema],
     tokenizer_wrapper: TokenizerWrapper,
-) -> tuple[str, int, set, set]: 
+) -> tuple[str, int, set, set]:
+    """
+    Package sub-community reports into a CSV format description.
+
+    For hierarchical community structures, this function retrieves and formats
+    sub-community reports, helping to provide context for higher-level communities.
+
+    Args:
+        community: Community schema containing sub_communities references
+        max_token_size: Maximum tokens allowed for sub-community descriptions
+        already_reports: Dictionary of already generated community reports
+        tokenizer_wrapper: TokenizerWrapper for token counting
+
+    Returns:
+        tuple: (sub_communities_csv, token_count, included_nodes_set, included_edges_set)
+    """ 
     all_sub_communities = [
         already_reports[k] for k in community["sub_communities"] if k in already_reports
     ]
@@ -469,10 +651,26 @@ async def _pack_single_community_describe(
     already_reports: dict[str, CommunitySchema] = {},
     global_config: dict = {},
 ) -> str:
+    """
+    Generate a comprehensive description of a single community for report generation.
 
-    
+    This function packages all relevant information about a community (nodes, edges,
+    sub-community reports) into a formatted string suitable for LLM processing.
+    It implements intelligent token budget management to fit within size constraints.
 
-    # 1. 准备原始数据
+    Args:
+        knwoledge_graph_inst: Knowledge graph storage instance
+        community: Community schema to describe
+        tokenizer_wrapper: TokenizerWrapper for token counting
+        max_token_size: Maximum tokens allowed in the output (default: 12000)
+        already_reports: Dictionary of already generated community reports
+        global_config: Global configuration dictionary
+
+    Returns:
+        str: Formatted community description with reports, entities, and relationships in CSV format
+    """
+
+    # 1. Prepare raw data
     nodes_in_order = sorted(community["nodes"])
     edges_in_order = sorted(community["edges"], key=lambda x: x[0] + x[1])
 
@@ -601,7 +799,17 @@ async def _pack_single_community_describe(
 
 
 def _community_report_json_to_str(parsed_output: dict) -> str:
-    """refer official graphrag: index/graph/extractors/community_reports"""
+    """
+    Convert community report JSON to formatted markdown string.
+
+    Reference: Official GraphRAG implementation (index/graph/extractors/community_reports)
+
+    Args:
+        parsed_output: Dictionary containing title, summary, and findings
+
+    Returns:
+        str: Formatted markdown report
+    """
     title = parsed_output.get("title", "Report")
     summary = parsed_output.get("summary", "")
     findings = parsed_output.get("findings", [])
@@ -628,6 +836,22 @@ async def generate_community_report(
     tokenizer_wrapper: TokenizerWrapper,
     global_config: dict,
 ):
+    """
+    Generate descriptive reports for all communities in the knowledge graph.
+
+    This function processes communities hierarchically (from highest to lowest level),
+    generating LLM-based summaries that describe the entities, relationships, and
+    themes within each community.
+
+    Args:
+        community_report_kv: Key-value storage for persisting community reports
+        knwoledge_graph_inst: Knowledge graph containing the community structure
+        tokenizer_wrapper: TokenizerWrapper for token management
+        global_config: Global configuration with LLM settings
+
+    Returns:
+        None (results are stored in community_report_kv)
+    """
     llm_extra_kwargs = global_config["special_community_report_llm_kwargs"]
     use_llm_func: callable = global_config["best_model_func"]
     use_string_json_convert_func: callable = global_config["convert_response_to_json_func"]
@@ -942,6 +1166,26 @@ async def local_query(
     tokenizer_wrapper,
     global_config: dict,
 ) -> str:
+    """
+    Perform a local knowledge graph query.
+
+    Local search finds entities related to the query and retrieves their immediate
+    context including connected entities, relationships, relevant text chunks, and
+    community reports. This is best for specific questions about particular entities.
+
+    Args:
+        query: User query string
+        knowledge_graph_inst: Knowledge graph storage instance
+        entities_vdb: Vector database containing entity embeddings
+        community_reports: Storage for community reports
+        text_chunks_db: Storage for original text chunks
+        query_param: Query configuration parameters
+        tokenizer_wrapper: TokenizerWrapper for token management
+        global_config: Global configuration with LLM settings
+
+    Returns:
+        str: LLM-generated response based on local context, or context only if requested
+    """
     use_model_func = global_config["best_model_func"]
     context = await _build_local_query_context(
         query,
@@ -1024,6 +1268,27 @@ async def global_query(
     tokenizer_wrapper,
     global_config: dict,
 ) -> str:
+    """
+    Perform a global knowledge graph query.
+
+    Global search uses a map-reduce approach over community reports to answer
+    broad questions about the entire dataset. Multiple "analyst" perspectives are
+    generated and then reduced into a final answer. Best for high-level questions
+    requiring a holistic view.
+
+    Args:
+        query: User query string
+        knowledge_graph_inst: Knowledge graph storage instance
+        entities_vdb: Vector database containing entity embeddings (unused in global search)
+        community_reports: Storage for community reports
+        text_chunks_db: Storage for original text chunks (unused in global search)
+        query_param: Query configuration parameters
+        tokenizer_wrapper: TokenizerWrapper for token management
+        global_config: Global configuration with LLM settings
+
+    Returns:
+        str: LLM-generated response based on global community analysis
+    """
     community_schema = await knowledge_graph_inst.community_schema()
     community_schema = {
         k: v for k, v in community_schema.items() if v["level"] <= query_param.level
@@ -1112,6 +1377,24 @@ async def naive_query(
     tokenizer_wrapper,
     global_config: dict,
 ):
+    """
+    Perform a naive vector-based similarity search query.
+
+    This is the simplest query mode that performs traditional vector similarity search
+    without using the knowledge graph structure. It finds and retrieves the most similar
+    text chunks and passes them to an LLM for answering.
+
+    Args:
+        query: User query string
+        chunks_vdb: Vector database containing text chunk embeddings
+        text_chunks_db: Storage for original text chunks
+        query_param: Query configuration parameters
+        tokenizer_wrapper: TokenizerWrapper for token management
+        global_config: Global configuration with LLM settings
+
+    Returns:
+        str: LLM-generated response based on retrieved chunks, or chunks only if requested
+    """
     use_model_func = global_config["best_model_func"]
     results = await chunks_vdb.query(query, top_k=query_param.top_k)
     if not len(results):

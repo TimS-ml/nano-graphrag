@@ -1,13 +1,34 @@
+"""Entity extraction module for knowledge graph construction.
+
+This module provides components for extracting entities and relationships from text documents
+using DSPy-based language models. It implements a sophisticated extraction pipeline with
+optional self-refinement capabilities to improve the quality of extracted knowledge.
+
+The module supports:
+    - Extraction of typed entities (people, organizations, locations, etc.)
+    - Relationship extraction with different orders (direct, second-order, third-order)
+    - Self-refinement through critique and refinement iterations
+    - Exception handling for robust extraction
+
+Typical usage example:
+    extractor = TypedEntityRelationshipExtractor(
+        lm=my_language_model,
+        self_refine=True,
+        num_refine_turns=2
+    )
+    result = extractor(input_text="Your text here")
+    entities = result.entities
+    relationships = result.relationships
+"""
+
 import dspy
 from pydantic import BaseModel, Field
 from nano_graphrag._utils import clean_str
 from nano_graphrag._utils import logger
 
 
-"""
-Obtained from:
-https://github.com/SciPhi-AI/R2R/blob/6e958d1e451c1cb10b6fc868572659785d1091cb/r2r/providers/prompts/defaults.jsonl
-"""
+# Obtained from:
+# https://github.com/SciPhi-AI/R2R/blob/6e958d1e451c1cb10b6fc868572659785d1091cb/r2r/providers/prompts/defaults.jsonl
 ENTITY_TYPES = [
     "PERSON",
     "ORGANIZATION",
@@ -63,6 +84,22 @@ ENTITY_TYPES = [
 
 
 class Entity(BaseModel):
+    """Represents an extracted entity from text with its type and metadata.
+
+    An Entity captures a named entity (person, organization, location, etc.) identified
+    in the source text along with its type, detailed description, and importance score.
+    This model is used as the output format for entity extraction processes.
+
+    Attributes:
+        entity_name: The name of the entity as it appears in the text.
+        entity_type: The classification type of the entity (e.g., PERSON, ORGANIZATION).
+        description: A detailed and comprehensive description of the entity, including
+            its role, significance, characteristics, relationships, and any relevant
+            historical or contextual information.
+        importance_score: A normalized score (0.0 to 1.0) indicating the entity's
+            importance in the context, where 1.0 represents the highest importance.
+    """
+
     entity_name: str = Field(..., description="The name of the entity.")
     entity_type: str = Field(..., description="The type of the entity.")
     description: str = Field(
@@ -76,6 +113,20 @@ class Entity(BaseModel):
     )
 
     def to_dict(self):
+        """Converts the entity to a dictionary with cleaned and normalized values.
+
+        This method prepares the entity data for storage or further processing by:
+        - Converting entity names and types to uppercase
+        - Cleaning strings to remove extra whitespace and special characters
+        - Ensuring the importance score is a float type
+
+        Returns:
+            dict: A dictionary containing the cleaned entity data with keys:
+                - entity_name: Uppercase, cleaned entity name
+                - entity_type: Uppercase, cleaned entity type
+                - description: Cleaned description text
+                - importance_score: Float value between 0.0 and 1.0
+        """
         return {
             "entity_name": clean_str(self.entity_name.upper()),
             "entity_type": clean_str(self.entity_type.upper()),
@@ -85,6 +136,27 @@ class Entity(BaseModel):
 
 
 class Relationship(BaseModel):
+    """Represents a relationship between two entities in the knowledge graph.
+
+    A Relationship captures the connection between a source entity and a target entity,
+    including the nature of their relationship, its strength, and its order (direct vs.
+    indirect connections). This model supports multi-hop relationship reasoning.
+
+    Attributes:
+        src_id: The name/identifier of the source entity in the relationship.
+        tgt_id: The name/identifier of the target entity in the relationship.
+        description: A detailed and comprehensive description of the relationship,
+            including its nature (e.g., familial, professional, causal), impact,
+            significance, historical context, evolution over time, and any notable
+            events or actions resulting from the relationship.
+        weight: A normalized score (0.0 to 1.0) indicating the strength of the
+            relationship, where 1.0 represents the strongest possible connection.
+        order: The degree of separation between entities:
+            - 1: Direct/immediate relationships
+            - 2: Second-order/indirect relationships
+            - 3: Third-order/further indirect relationships
+    """
+
     src_id: str = Field(..., description="The name of the source entity.")
     tgt_id: str = Field(..., description="The name of the target entity.")
     description: str = Field(
@@ -105,6 +177,21 @@ class Relationship(BaseModel):
     )
 
     def to_dict(self):
+        """Converts the relationship to a dictionary with cleaned and normalized values.
+
+        This method prepares the relationship data for storage or further processing by:
+        - Converting entity IDs to uppercase for consistency
+        - Cleaning strings to remove extra whitespace and special characters
+        - Ensuring numeric values are of the correct type
+
+        Returns:
+            dict: A dictionary containing the cleaned relationship data with keys:
+                - src_id: Uppercase, cleaned source entity name
+                - tgt_id: Uppercase, cleaned target entity name
+                - description: Cleaned description text
+                - weight: Float value between 0.0 and 1.0
+                - order: Integer value (1, 2, or 3)
+        """
         return {
             "src_id": clean_str(self.src_id.upper()),
             "tgt_id": clean_str(self.tgt_id.upper()),
@@ -234,19 +321,63 @@ class RefineCombinedExtraction(dspy.Signature):
 
 
 class TypedEntityRelationshipExtractorException(dspy.Module):
+    """Exception handler wrapper for entity and relationship extraction.
+
+    This module wraps a predictor to provide graceful exception handling during
+    the extraction process. When specified exception types occur, it returns empty
+    results instead of propagating the exception, allowing the extraction pipeline
+    to continue processing other inputs.
+
+    This is particularly useful for handling validation errors or LLM output
+    parsing failures without interrupting batch processing.
+
+    Attributes:
+        predictor: The underlying DSPy module that performs the actual extraction.
+        exception_types: Tuple of exception types to catch and handle gracefully.
+    """
+
     def __init__(
         self,
         predictor: dspy.Module,
         exception_types: tuple[type[Exception]] = (Exception,),
     ):
+        """Initializes the exception handler wrapper.
+
+        Args:
+            predictor: The DSPy module to wrap with exception handling.
+            exception_types: Tuple of exception types to catch and convert to empty
+                results. Other exceptions will be re-raised. Defaults to (Exception,).
+        """
         super().__init__()
         self.predictor = predictor
         self.exception_types = exception_types
 
     def copy(self):
+        """Creates a shallow copy of this exception handler.
+
+        Returns:
+            TypedEntityRelationshipExtractorException: A new instance wrapping the
+                same predictor with the same exception handling configuration.
+        """
         return TypedEntityRelationshipExtractorException(self.predictor)
 
     def forward(self, **kwargs):
+        """Executes the wrapped predictor with exception handling.
+
+        Attempts to run the predictor with the provided arguments. If an exception
+        of the specified types occurs, returns an empty prediction instead of failing.
+        All other exceptions are re-raised.
+
+        Args:
+            **kwargs: Arbitrary keyword arguments to pass to the wrapped predictor.
+
+        Returns:
+            dspy.Prediction: The predictor's result, or an empty prediction (with
+                empty entities and relationships lists) if a handled exception occurs.
+
+        Raises:
+            Exception: Any exception that is not in the configured exception_types.
+        """
         try:
             prediction = self.predictor(**kwargs)
             return prediction
@@ -259,6 +390,32 @@ class TypedEntityRelationshipExtractorException(dspy.Module):
 
 
 class TypedEntityRelationshipExtractor(dspy.Module):
+    """Main module for extracting typed entities and relationships from text.
+
+    This module orchestrates the complete entity and relationship extraction pipeline
+    using language models via DSPy. It supports basic extraction with Chain-of-Thought
+    reasoning and optional self-refinement through iterative critique and improvement.
+
+    The extraction process:
+    1. Initial extraction: Identifies entities and relationships from input text
+    2. (Optional) Critique: Analyzes the extraction for completeness and accuracy
+    3. (Optional) Refinement: Improves the extraction based on the critique
+    4. Steps 2-3 can be repeated for multiple refinement turns
+
+    This approach helps improve extraction quality by allowing the model to review
+    and enhance its own outputs.
+
+    Attributes:
+        lm: The language model to use for extraction. If None, uses the default
+            from dspy.settings.
+        entity_types: List of valid entity types to extract (e.g., PERSON, ORGANIZATION).
+        self_refine: Whether to enable the self-refinement process.
+        num_refine_turns: Number of critique-refine iterations to perform.
+        extractor: The core extraction module (ChainOfThought wrapped with exception handling).
+        critique: The critique module (only initialized if self_refine is True).
+        refine: The refinement module (only initialized if self_refine is True).
+    """
+
     def __init__(
         self,
         lm: dspy.LM = None,
@@ -267,6 +424,23 @@ class TypedEntityRelationshipExtractor(dspy.Module):
         self_refine: bool = False,
         num_refine_turns: int = 1,
     ):
+        """Initializes the entity and relationship extractor.
+
+        Args:
+            lm: The DSPy language model to use for extraction. If None, the default
+                language model from dspy.settings will be used. Defaults to None.
+            max_retries: Maximum number of retry attempts for each LLM call when
+                parsing or validation fails. Defaults to 3.
+            entity_types: List of entity type strings to extract. Entities not matching
+                these types will be filtered out. Defaults to the global ENTITY_TYPES list
+                which includes 60+ common entity types.
+            self_refine: Whether to enable self-refinement through critique and
+                refinement iterations. This improves quality but increases LLM calls.
+                Defaults to False.
+            num_refine_turns: Number of critique-and-refine iterations to perform
+                when self_refine is True. More turns may improve quality but increase
+                cost and latency. Defaults to 1.
+        """
         super().__init__()
         self.lm = lm
         self.entity_types = entity_types
@@ -289,6 +463,37 @@ class TypedEntityRelationshipExtractor(dspy.Module):
             )
 
     def forward(self, input_text: str) -> dspy.Prediction:
+        """Extracts entities and relationships from the provided text.
+
+        This is the main entry point for the extraction process. It performs the following:
+        1. Runs the initial entity and relationship extraction using Chain-of-Thought
+        2. If self_refine is enabled, iteratively critiques and refines the extraction
+        3. Converts the final Entity and Relationship objects to dictionaries
+        4. Returns the results in a DSPy Prediction object
+
+        The method uses the configured language model and entity types, and applies
+        the self-refinement process if enabled during initialization.
+
+        Args:
+            input_text: The text document from which to extract entities and relationships.
+                This can be a paragraph, article, or any text content containing
+                entities and their relationships.
+
+        Returns:
+            dspy.Prediction: A prediction object containing two fields:
+                - entities: List of dictionaries, each representing an extracted entity
+                  with keys: entity_name, entity_type, description, importance_score
+                - relationships: List of dictionaries, each representing an extracted
+                  relationship with keys: src_id, tgt_id, description, weight, order
+
+        Note:
+            If extraction fails with a ValueError (e.g., due to LLM output parsing issues),
+            the exception handler will return empty lists for both entities and relationships
+            rather than raising an exception. This allows batch processing to continue.
+
+            Debug logging is enabled during refinement to track the number of entities
+            and relationships before and after each refinement turn.
+        """
         with dspy.context(lm=self.lm if self.lm is not None else dspy.settings.lm):
             extraction_result = self.extractor(
                 input_text=input_text, entity_types=self.entity_types
