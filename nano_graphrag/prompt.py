@@ -1,6 +1,25 @@
 """
+Prompt Templates Module for nano-graphrag
+
+This module contains all the prompt templates used throughout the GraphRAG pipeline.
+These prompts are designed to guide Large Language Models (LLMs) in various tasks including:
+
+- Entity and relationship extraction from text
+- Community report generation
+- Query response generation (local, global, and naive modes)
+- Claim extraction and validation
+
+The prompts are based on and adapted from the Microsoft GraphRAG project.
+All templates use placeholder variables (in {curly_braces}) that are filled in at runtime
+with actual data.
+
 Reference:
- - Prompts are from [graphrag](https://github.com/microsoft/graphrag)
+ - Prompts are adapted from the official GraphRAG implementation:
+   https://github.com/microsoft/graphrag
+
+Constants:
+    GRAPH_FIELD_SEP: Separator used to delimit multiple values in graph fields (default: "<SEP>")
+    PROMPTS: Dictionary containing all prompt templates indexed by template name
 """
 
 GRAPH_FIELD_SEP = "<SEP>"
